@@ -1,0 +1,12 @@
+[package]
+name = "dbdb"
+version = "0.1.0"
+authors = ["aptend <crescentwhale@hotmail.com>"]
+edition = "2018"
+
+[dependencies]
+serde = { version = "1.0.105", features = ["derive"] }
+log = "0.4.8"
+pretty_env_logger = "0.4.0"
+anyhow = "1.0.27"
+cluFlock = "1.2.5"
