@@ -72,7 +72,7 @@ pub trait SerdeInterface {
 }
 
 #[allow(dead_code)]
-struct SerdeJson;
+pub struct SerdeJson;
 
 impl SerdeInterface for SerdeJson {
     fn from_reader<T, R>(reader: R) -> Result<T>
@@ -96,7 +96,7 @@ impl SerdeInterface for SerdeJson {
 }
 
 #[allow(dead_code)]
-struct SerdeBincode;
+pub struct SerdeBincode;
 
 impl SerdeInterface for SerdeBincode {
     fn from_reader<T, R>(reader: R) -> Result<T>
