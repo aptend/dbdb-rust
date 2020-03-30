@@ -1,121 +1,50 @@
-use serde::{Deserialize, Serialize};
-use std::fs::{File, OpenOptions};
-use std::io::{BufRead, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
-use std::ops::{Deref, DerefMut};
-use std::path::{Path, PathBuf};
+pub mod storage;
 
-use log::{debug, info};
-use pretty_env_logger;
+use std::marker::PhantomData;
+use storage::{SerdeInterface, Storage};
+
+use std::io::{Read, Seek, SeekFrom, Write};
+
+use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 
 use anyhow::{Context, Result};
 
-use cluFlock::{ExclusiveFlock, FlockLock, ToFlock};
-
-const SUPERBLOCK: usize = 4096;
-
-pub struct FileStorage {
-    file: File,
-    pos: u64,
+pub struct Ref<T, S> {
+    inner: Option<T>,
+    pub addr: Option<u64>,
+    format: PhantomData<S>,
 }
 
-#[derive(Serialize, Deserialize)]
-struct Meta {
-    root_addr: u64,
-}
-
-struct FileStorageGuard<'a> {
-    inner: &'a mut FileStorage,
-}
-
-impl<'a> FileStorageGuard<'a> {
-    pub fn new(inner: &'a mut FileStorage) -> Result<Self> {
-        // let exfile = ExclusiveFlock::wait_lock(&inner.file).map_err(|e| e.err())?;
-        Ok(FileStorageGuard {
+impl<T, S> Ref<T, S>
+where
+    T: DeserializeOwned + Serialize,
+    S: SerdeInterface,
+{
+    fn new(inner: Option<T>, addr: Option<u64>) -> Self {
+        Ref {
             inner,
-        })
-    }
-}
-
-impl<'a> Deref for FileStorageGuard<'a> {
-    type Target = FileStorage;
-
-    fn deref(&self) -> &Self::Target {
-        &self.inner
-    }
-}
-
-impl<'a> DerefMut for FileStorageGuard<'a> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.inner
-    }
-}
-
-impl Write for FileStorage {
-    fn write(&mut self, data: &[u8]) -> Result<usize, std::io::Error> {
-        match self.file.write(data) {
-            Ok(n) => {
-                self.pos += n as u64;
-                Ok(n)
-            }
-            Err(e) => Err(e),
+            addr,
+            format: PhantomData,
         }
     }
 
-    fn flush(&mut self) -> Result<(), std::io::Error> {
-        self.file.flush()
-    }
-}
-
-impl Read for FileStorage {
-    fn read(&mut self, buf: &mut [u8]) -> Result<usize, std::io::Error> {
-        self.file.read(buf)
-    }
-}
-
-impl Seek for FileStorage {
-    fn seek(&mut self, pos: SeekFrom) -> Result<u64, std::io::Error> {
-        self.file.seek(pos)
-    }
-}
-
-impl FileStorage {
-    /// Open the file, write superblock matadata and return a `FileStorage`
-    pub fn new<P: AsRef<Path>>(path: P) -> Result<Self> {
-        let path = PathBuf::from(path.as_ref());
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .open(&path)
-            .with_context(|| format!("can't open storage file {:?}", path))?;
-
-        let pos = 0;
-        let storage = FileStorage { file, pos };
-
-        Ok(storage)
+    fn get(&mut self, mut storage: impl Storage) -> Result<Option<&T>> {
+        if self.inner.is_none() && self.addr.is_some() {
+            let _ = storage.seek(SeekFrom::Start(self.addr.unwrap()))?;
+            self.inner = Some(S::from_reader(storage)?);
+        }
+        Ok(self.inner.as_ref())
     }
 
-    pub fn tell(&self) -> u64 {
-        self.pos
-    }
-
-    fn ensure_superblock(&mut self) -> Result<()> {
-        let end_idx = self.file.seek(SeekFrom::End(0))?;
+    fn store(&mut self, mut storage: impl Storage) -> Result<()> {
+        // Write to disk only when addr is None, which means it is a new item
+        // Remember, we has a immutable storage structure.
+        // Once an item was stored, we will not write it again, ever.
+        if self.inner.is_some() && self.addr.is_none() {
+            self.addr = Some(storage.get_write_addr()?);
+            S::to_writer(storage, self.inner.as_ref().unwrap())?;
+        }
         Ok(())
-    }
-
-    // Block util we accquire the lock of the current file.
-    // return `Result<FileStorageGuard>` when we accquire the lock successfully,
-    fn lock(&mut self) -> Result<FileStorageGuard> {
-        FileStorageGuard::new(self)
-    }
-}
-
-#[cfg(test)]
-mod test {
-
-    #[test]
-    fn test_storage_open() {
-        unimplemented!();
     }
 }
