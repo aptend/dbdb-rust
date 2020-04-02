@@ -1,5 +1,6 @@
-use serde::{de::DeserializeOwned, Deserialize, Serialize};
-use serde_json::de;
+use crate::serde_interface::{SerdeBincode, SerdeInterface};
+
+use serde::{Deserialize, Serialize};
 
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -17,11 +18,11 @@ use std::os::unix::io::{AsRawFd, RawFd};
 #[cfg(windows)]
 use std::os::windows::io::{AsRawHandle, RawHandle};
 
-const SUPERBLOCK: u64 = 4096;
+const SUPERBLOCK: u64 = 512;
 
 pub trait Storage: Write + Read + Seek {
     /// Block until we acquire an advisory lock of the current storage.
-    fn lock(&mut self) -> Result<FileStorageGuard>;
+    fn lock(&self) -> Result<FileStorageGuard>;
 
     /// Get the address where the next write will happen.
     fn get_write_addr(&mut self) -> Result<u64>;
@@ -43,6 +44,7 @@ pub trait Storage: Write + Read + Seek {
 /// ```
 ///
 pub struct FileStorage {
+    path: PathBuf,
     file: File,
 }
 
@@ -51,8 +53,8 @@ pub struct FileStorage {
 /// `FileStorageGuard` implements `DerefMut<Target=FileStorage>` trait, so
 /// you can use it like `Box<FileStorage>`. When `FileStorageGuard` is dropped,
 /// the lock on `FileStorage` will be released.
-pub struct FileStorageGuard<'a> {
-    inner: FlockLock<&'a mut FileStorage>,
+pub struct FileStorageGuard {
+    inner: FlockLock<FileStorage>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -60,70 +62,14 @@ struct Meta {
     root_addr: Option<u64>,
 }
 
-pub trait SerdeInterface {
-    fn from_reader<T, R>(reader: R) -> Result<T>
-    where
-        T: DeserializeOwned,
-        R: Read;
-    fn to_writer<T, W>(writer: W, value: &T) -> Result<()>
-    where
-        T: Serialize,
-        W: Write;
-}
-
-#[allow(dead_code)]
-pub struct SerdeJson;
-
-impl SerdeInterface for SerdeJson {
-    fn from_reader<T, R>(reader: R) -> Result<T>
-    where
-        T: DeserializeOwned,
-        R: Read,
-    {
-        // get a deserializer from serde_json
-        let mut der = de::Deserializer::new(de::IoRead::new(reader));
-        let t: T = Deserialize::deserialize(&mut der)?;
-        // we don't check if we have consumed the whole
-        Ok(t)
-    }
-    fn to_writer<T, W>(writer: W, value: &T) -> Result<()>
-    where
-        T: Serialize,
-        W: Write,
-    {
-        Ok(serde_json::to_writer(writer, value)?)
-    }
-}
-
-#[allow(dead_code)]
-pub struct SerdeBincode;
-
-impl SerdeInterface for SerdeBincode {
-    fn from_reader<T, R>(reader: R) -> Result<T>
-    where
-        T: DeserializeOwned,
-        R: Read,
-    {
-        let t: T = bincode::deserialize_from(reader)?;
-        Ok(t)
-    }
-    fn to_writer<T, W>(writer: W, value: &T) -> Result<()>
-    where
-        T: Serialize,
-        W: Write,
-    {
-        Ok(bincode::serialize_into(writer, value)?)
-    }
-}
-
-impl<'a> FileStorageGuard<'a> {
-    pub fn new(file_store: &'a mut FileStorage) -> Result<Self> {
+impl FileStorageGuard {
+    pub fn new(file_store: FileStorage) -> Result<Self> {
         let inner = ExclusiveFlock::wait_lock(file_store).map_err(|e| e.err())?;
         Ok(FileStorageGuard { inner })
     }
 }
 
-impl<'a> Deref for FileStorageGuard<'a> {
+impl Deref for FileStorageGuard {
     type Target = FileStorage;
 
     fn deref(&self) -> &Self::Target {
@@ -131,7 +77,7 @@ impl<'a> Deref for FileStorageGuard<'a> {
     }
 }
 
-impl<'a> DerefMut for FileStorageGuard<'a> {
+impl DerefMut for FileStorageGuard {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.inner
     }
@@ -190,7 +136,7 @@ impl FileStorage {
             .open(&path)
             .with_context(|| format!("can't open storage file {:?}", path))?;
 
-        let mut storage = FileStorage { file };
+        let mut storage = FileStorage { path, file };
         storage.ensure_superblock()?;
         Ok(storage)
     }
@@ -205,11 +151,18 @@ impl FileStorage {
         }
         Ok(())
     }
+
+    fn try_clone(&self) -> Result<FileStorage> {
+        Ok(FileStorage {
+            path: self.path.clone(),
+            file: self.file.try_clone()?,
+        })
+    }
 }
 
 impl Storage for FileStorage {
-    fn lock(&mut self) -> Result<FileStorageGuard> {
-        FileStorageGuard::new(self)
+    fn lock(&self) -> Result<FileStorageGuard> {
+        FileStorageGuard::new(self.try_clone()?)
     }
 
     fn get_write_addr(&mut self) -> Result<u64> {
@@ -256,7 +209,7 @@ mod storage_test {
 
         let start = time::Instant::now();
         let handle = thread::spawn(move || -> time::Duration {
-            let mut storage = FileStorage::new(path).unwrap();
+            let storage = FileStorage::new(path).unwrap();
             let mut guard = storage.lock().unwrap();
             let d = start.elapsed();
             guard.write_all(b" world").unwrap();

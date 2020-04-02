@@ -1,12 +1,13 @@
 #![allow(dead_code)]
 
+pub mod serde_interface;
 pub mod storage;
 
-use std::marker::PhantomData;
 use std::io::SeekFrom;
+use std::marker::PhantomData;
 
-use std::rc::Rc;
 use std::cell::RefCell;
+use std::rc::Rc;
 
 use std::clone::Clone;
 use std::convert::From;
@@ -16,7 +17,8 @@ use serde::{Deserialize, Serialize};
 use anyhow::Result;
 use log::debug;
 
-use storage::{FileStorage, FileStorageGuard, SerdeInterface, SerdeJson, Storage};
+use serde_interface::{SerdeInterface, SerdeJson};
+use storage::{FileStorage, FileStorageGuard, Storage};
 
 macro_rules! rc {
     ($v: expr) => {
@@ -55,13 +57,13 @@ struct TreeNode {
     size: usize,
 }
 
-pub struct NodeAgent<S> {
+struct NodeAgent<S> {
     inner: Option<TreeNode>,
     pub addr: Option<u64>,
     format: PhantomData<S>,
 }
 
-pub struct ValueAgent<S> {
+struct ValueAgent<S> {
     inner: Option<String>,
     pub addr: Option<u64>,
     format: PhantomData<S>,
@@ -115,29 +117,34 @@ impl From<NodeHd> for TreeNode {
     }
 }
 
-struct Logical<'a> {
+pub struct LogicalTree {
     storage: FileStorage,
-    guard: Option<FileStorageGuard<'a>>,
+    guard: Option<FileStorageGuard>,
     root: Option<NodeJsonAgent>,
 }
 
-impl<'a> Logical<'a> {
+impl LogicalTree {
+    /// Create a new LogicalTree
     pub fn new<P: AsRef<std::path::Path>>(path: P) -> Result<Self> {
         let storage = FileStorage::new(path)?;
         let root = None;
         let guard = None;
-        let mut logical = Logical { storage, guard, root };
+        let mut logical = LogicalTree {
+            storage,
+            guard,
+            root,
+        };
         logical.refresh_tree_view()?;
         Ok(logical)
     }
 
     /// Begin a transaction
-    pub fn begin(&'a mut self) -> Result<()> {
+    pub fn begin(&mut self) -> Result<()> {
         if self.guard.is_none() {
-            // WRONG! 
-            // 这里形成了一个自引用结构，会导致之后的所有方法都不可用
-            let guard: FileStorageGuard<'a> = self.storage.lock()?;
+            let guard: FileStorageGuard = self.storage.lock()?;
             self.guard = Some(guard);
+            // now we get an exclusive write access of the underlying file
+            self.refresh_tree_view()?;
         }
         Ok(())
     }
@@ -148,7 +155,9 @@ impl<'a> Logical<'a> {
         let node = self.root.as_ref().cloned();
         if let Some(node) = node {
             node.borrow_mut().store(self.get_storage())?;
-            self.storage.commit_root_addr(node.borrow().addr.unwrap())?;
+            let addr = node.borrow().addr.unwrap();
+            debug!("commit root addr {}", addr);
+            self.storage.commit_root_addr(addr)?;
         }
         // end a transacation if there is one
         let _ = self.guard.take();
@@ -158,26 +167,36 @@ impl<'a> Logical<'a> {
     /// Get value by key from the current db
     pub fn get(&mut self, key: &str) -> Result<Option<String>> {
         debug!("[get] Begin with {:?}", key);
+        if self.guard.is_none() {
+            self.refresh_tree_view()?;
+        }
         let node = self.root.as_ref().cloned();
         self.find(node, key)
     }
 
     /// Put a pair of key:value into the currnent db
-    /// If use this function without trasaction context, it will be executed as 
-    /// a single-command transaction. That is:
-    /// ```no-use
+    /// If use this function without a trasaction context, it will be executed
+    /// as a single-command transaction. That is:
+    /// ```no_run
     /// tree.put("answer".to_owned(), "42".to_owned())?;
-    /// ``` 
+    /// ```
     /// is equivalent to  
-    /// ```no-use
+    /// ```no_run
     /// tree.begin()?;
     /// tree.put("answer".to_owned(), "42".to_owned())?;
     /// tree.commit()?;
     /// ```
     pub fn put(&mut self, key: String, value: String) -> Result<()> {
         debug!("[put] Begin with {:?}:{:?}", key, value);
-        let node = self.root.as_ref().cloned();
-        self.root = Some(self.insert(node, key, value)?);
+        if self.guard.is_none() {
+            self.begin()?;
+            let node = self.root.as_ref().cloned();
+            self.root = Some(self.insert(node, key, value)?.0);
+            self.commit()?;
+        } else {
+            let node = self.root.as_ref().cloned();
+            self.root = Some(self.insert(node, key, value)?.0);
+        }
         Ok(())
     }
 
@@ -189,21 +208,20 @@ impl<'a> Logical<'a> {
     }
 
     fn refresh_tree_view(&mut self) -> Result<()> {
-        debug!("Refresh");
+        debug!("Try to refresh view");
         let storage = self.get_storage();
         if let Some(addr) = storage.get_root_addr()? {
-            debug!("Get tree view at {}", addr);
+            debug!("Get an version of tree view, at addr {}", addr);
             self.root = Some(rc!(NodeAgent::new(None, Some(addr))));
         }
         Ok(())
     }
-    
 
     fn find(&mut self, agent: Option<NodeJsonAgent>, key: &str) -> Result<Option<String>> {
         if let Some(agent) = agent {
             let mut agent = agent.borrow_mut();
             let node = agent.get_mut(self.get_storage())?.unwrap();
-            debug!("[find] Find alone node {:?}", node.key);
+            debug!("[_find] Find alone node {:?}", node.key);
             if key < &node.key {
                 self.find(node.left_agent.clone(), key)
             } else if key > &node.key {
@@ -224,29 +242,34 @@ impl<'a> Logical<'a> {
         agent: Option<NodeJsonAgent>,
         key: String,
         value: String,
-    ) -> Result<NodeJsonAgent> {
+    ) -> Result<(NodeJsonAgent, usize)> {
         if let Some(agent) = agent {
             let mut agent = agent.borrow_mut();
             let node = agent.get(self.get_storage())?.unwrap();
             let mut new_node = node.clone();
+            let mut size_delta = 0;
             if key < node.key {
-                new_node.left_agent = Some(self.insert(node.left_agent.clone(), key, value)?);
-                new_node.size += 1;
+                let result = self.insert(node.left_agent.clone(), key, value)?;
+                new_node.left_agent = Some(result.0);
+                size_delta = result.1;
+                new_node.size += size_delta;
             } else if key > node.key {
-                new_node.right_agent = Some(self.insert(node.right_agent.clone(), key, value)?);
-                new_node.size += 1;
+                let result = self.insert(node.right_agent.clone(), key, value)?;
+                new_node.right_agent = Some(result.0);
+                size_delta = result.1;
+                new_node.size += size_delta;
             } else {
                 new_node.value_agent = rc!(ValueAgent::new(Some(value), None));
             }
             debug!(
-                "[insert] Return insert alone node {:?} with size {}",
+                "[_insert] Return insert alone node {:?} with size {}",
                 new_node.key, new_node.size
             );
-            Ok(rc!(NodeAgent::new(Some(new_node), None)))
+            Ok((rc!(NodeAgent::new(Some(new_node), None)), size_delta))
         } else {
             // new a TreeNode
-            debug!("[insert] New a TreeNode with {}:{} with size 1", key, value);
-            Ok(rc!(NodeAgent::new(Some(TreeNode::new(key, value)), None)))
+            debug!("[_insert] New a TreeNode with {}:{} with size 1", key, value);
+            Ok((rc!(NodeAgent::new(Some(TreeNode::new(key, value)), None)), 1))
         }
     }
 }
@@ -341,11 +364,66 @@ mod tree_test {
     use super::*;
     use pretty_env_logger;
     use tempfile;
+    use std::thread;
+    use std::time;
+    use std::path::PathBuf;
+
+    #[test]
+    #[cfg(unix)]
+    fn test_binary_tree_no_dirty_read() {
+        let path = tempfile::NamedTempFile::new().unwrap().into_temp_path();
+        let mut tree = LogicalTree::new(&path).unwrap();
+        let mut another_tree = LogicalTree::new(&path).unwrap();
+        tree.begin().unwrap();
+        tree.put("a".to_owned(), "1".to_owned()).unwrap();
+        // we can't read the new a:1 pair in another tree
+        assert_eq!(None, another_tree.get("a").unwrap());
+        tree.commit().unwrap();
+        // we can see the new pair after committing
+        assert_eq!(Some("1".to_owned()), another_tree.get("a").unwrap());
+    }
+
+    #[test]
+    fn test_binary_tree_concurrent_exclusive_write() {
+        pretty_env_logger::init();
+        // let path = tempfile::NamedTempFile::new().unwrap().into_temp_path();
+        let path = PathBuf::from("db.db");
+        let mut tree = LogicalTree::new(&path).unwrap();
+        tree.begin().unwrap();
+        let start_time = time::Instant::now();
+        let handle = thread::spawn(move || -> time::Duration {
+            let mut tree = LogicalTree::new(path).unwrap();
+            tree.begin().unwrap();
+            let gap = start_time.elapsed();
+            assert_eq!(Some("1".to_owned()), tree.get("a").unwrap());
+            tree.put("b".to_owned(), "2".to_owned()).unwrap();
+            tree.commit().unwrap();
+            assert_eq!(Some("2".to_owned()), tree.get("b").unwrap());
+            gap
+        });
+        tree.put("a".to_owned(), "1".to_owned()).unwrap();
+        let one_sec = time::Duration::from_secs(1);
+        thread::sleep(one_sec);
+        tree.commit().unwrap();
+        match handle.join() {
+            Ok(d) => assert!(
+                d >= one_sec,
+                format!("another process did't block for enough time, only {:?}", d)
+            ),
+            Err(e) => assert!(false, format!("subthread panic: {:?}", e)),
+        }
+
+        tree.put("c".to_owned(), "3".to_owned()).unwrap();
+        assert_eq!(Some("2".to_owned()), tree.get("b").unwrap());
+        assert_eq!(Some("3".to_owned()), tree.get("c").unwrap());
+        assert_eq!(Some("1".to_owned()), tree.get("a").unwrap());
+        assert_eq!(None, tree.get("z").unwrap());
+    }
 
     #[test]
     fn test_binary_tree_in_memory() {
         let path = tempfile::NamedTempFile::new().unwrap().into_temp_path();
-        let mut tree = Logical::new(path).unwrap();
+        let mut tree = LogicalTree::new(path).unwrap();
         assert_eq!(None, tree.get("hi").unwrap());
         tree.put("hello".to_owned(), "world".to_owned()).unwrap();
         tree.put("hi".to_owned(), "alice".to_owned()).unwrap();
@@ -357,15 +435,15 @@ mod tree_test {
 
     #[test]
     fn test_binary_tree_store() {
-        // pretty_env_logger::init();
-        let mut tree = Logical::new("db.db").unwrap();
+        let path = tempfile::NamedTempFile::new().unwrap().into_temp_path();
+        let mut tree = LogicalTree::new(&path).unwrap();
         tree.put("hello".to_owned(), "world".to_owned()).unwrap();
         tree.put("hi".to_owned(), "alice".to_owned()).unwrap();
         tree.put("arc".to_owned(), "shadow".to_owned()).unwrap();
         tree.put("before".to_owned(), "end".to_owned()).unwrap();
         tree.commit().unwrap();
         drop(tree);
-        let mut tree = Logical::new("db.db").unwrap();
+        let mut tree = LogicalTree::new(&path).unwrap();
         assert_eq!(Some("shadow".to_owned()), tree.get("arc").unwrap());
         assert_eq!(None, tree.get("zoo").unwrap());
     }
