@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use anyhow::Result;
 use log::debug;
 
-use storage::{FileStorage, SerdeInterface, SerdeJson, Storage};
+use storage::{FileStorage, FileStorageGuard, SerdeInterface, SerdeJson, Storage};
 
 macro_rules! rc {
     ($v: expr) => {
@@ -115,62 +115,101 @@ impl From<NodeHd> for TreeNode {
     }
 }
 
-struct Logical {
+struct Logical<'a> {
     storage: FileStorage,
+    guard: Option<FileStorageGuard<'a>>,
     root: Option<NodeJsonAgent>,
 }
 
-impl Logical {
-    fn new<P: AsRef<std::path::Path>>(path: P) -> Result<Self> {
+impl<'a> Logical<'a> {
+    pub fn new<P: AsRef<std::path::Path>>(path: P) -> Result<Self> {
         let storage = FileStorage::new(path)?;
         let root = None;
-        let mut logical = Logical { storage, root };
+        let guard = None;
+        let mut logical = Logical { storage, guard, root };
         logical.refresh_tree_view()?;
         Ok(logical)
     }
 
-    fn refresh_tree_view(&mut self) -> Result<()> {
-        debug!("Refresh");
-        if let Some(addr) = self.storage.get_root_addr()? {
-            debug!("Get tree view at {}", addr);
-            self.root = Some(rc!(NodeAgent::new(None, Some(addr))));
+    /// Begin a transaction
+    pub fn begin(&'a mut self) -> Result<()> {
+        if self.guard.is_none() {
+            // WRONG! 
+            // 这里形成了一个自引用结构，会导致之后的所有方法都不可用
+            let guard: FileStorageGuard<'a> = self.storage.lock()?;
+            self.guard = Some(guard);
         }
         Ok(())
     }
 
-    fn commit(&mut self) -> Result<()> {
+    /// Commit a transaction
+    pub fn commit(&mut self) -> Result<()> {
         debug!("[commit] Begin");
-        if let Some(ref node) = self.root {
-            node.borrow_mut().store(&mut self.storage)?;
+        let node = self.root.as_ref().cloned();
+        if let Some(node) = node {
+            node.borrow_mut().store(self.get_storage())?;
             self.storage.commit_root_addr(node.borrow().addr.unwrap())?;
         }
+        // end a transacation if there is one
+        let _ = self.guard.take();
         Ok(())
     }
 
-    fn get(&mut self, key: &str) -> Result<Option<String>> {
+    /// Get value by key from the current db
+    pub fn get(&mut self, key: &str) -> Result<Option<String>> {
         debug!("[get] Begin with {:?}", key);
         let node = self.root.as_ref().cloned();
         self.find(node, key)
     }
 
-    fn put(&mut self, key: String, value: String) -> Result<()> {
+    /// Put a pair of key:value into the currnent db
+    /// If use this function without trasaction context, it will be executed as 
+    /// a single-command transaction. That is:
+    /// ```no-use
+    /// tree.put("answer".to_owned(), "42".to_owned())?;
+    /// ``` 
+    /// is equivalent to  
+    /// ```no-use
+    /// tree.begin()?;
+    /// tree.put("answer".to_owned(), "42".to_owned())?;
+    /// tree.commit()?;
+    /// ```
+    pub fn put(&mut self, key: String, value: String) -> Result<()> {
         debug!("[put] Begin with {:?}:{:?}", key, value);
         let node = self.root.as_ref().cloned();
         self.root = Some(self.insert(node, key, value)?);
         Ok(())
     }
 
+    fn get_storage(&mut self) -> &mut impl Storage {
+        match self.guard.as_mut() {
+            Some(g) => &mut (**g),
+            None => &mut self.storage,
+        }
+    }
+
+    fn refresh_tree_view(&mut self) -> Result<()> {
+        debug!("Refresh");
+        let storage = self.get_storage();
+        if let Some(addr) = storage.get_root_addr()? {
+            debug!("Get tree view at {}", addr);
+            self.root = Some(rc!(NodeAgent::new(None, Some(addr))));
+        }
+        Ok(())
+    }
+    
+
     fn find(&mut self, agent: Option<NodeJsonAgent>, key: &str) -> Result<Option<String>> {
         if let Some(agent) = agent {
             let mut agent = agent.borrow_mut();
-            let node = agent.get_mut(&mut self.storage)?.unwrap();
+            let node = agent.get_mut(self.get_storage())?.unwrap();
             debug!("[find] Find alone node {:?}", node.key);
             if key < &node.key {
                 self.find(node.left_agent.clone(), key)
             } else if key > &node.key {
                 self.find(node.right_agent.clone(), key)
             } else {
-                match node.value_agent.borrow_mut().get(&mut self.storage)? {
+                match node.value_agent.borrow_mut().get(self.get_storage())? {
                     Some(s) => Ok(Some(String::from(s))),
                     None => Ok(None),
                 }
@@ -188,7 +227,7 @@ impl Logical {
     ) -> Result<NodeJsonAgent> {
         if let Some(agent) = agent {
             let mut agent = agent.borrow_mut();
-            let node = agent.get(&mut self.storage)?.unwrap();
+            let node = agent.get(self.get_storage())?.unwrap();
             let mut new_node = node.clone();
             if key < node.key {
                 new_node.left_agent = Some(self.insert(node.left_agent.clone(), key, value)?);
