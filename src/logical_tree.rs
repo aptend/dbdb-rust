@@ -197,9 +197,6 @@ where
     }
 }
 
-type NodeAgent = TreeNodeAgent<StringAgent>;
-type NodeAgentCell = Rc<RefCell<NodeAgent>>;
-
 /// TreeNode in memory, which we use to search the tree.
 ///
 /// Generic V means the type of value agent and generic N means
@@ -277,139 +274,178 @@ where
     }
 }
 
-/// Tree, an immutable tree, knows how to handle a type A agent.
-///
-/// Tree will work with LogicalTree and do read and write things
-trait DBTree<T> {
+/// Tree, an immutable tree holding user data, works with user interface
+///  and do some read and write things
+trait DBTree {
+    type Value;
     /// Create a new Tree.
     fn new() -> Result<Self>
     where
         Self: std::marker::Sized;
 
-    fn chroot(&mut self, addr: u64) -> Result<()>;
+    /// Change the root of the tree.
+    fn change_view(&mut self, addr: u64) -> Result<()>;
 
-    fn root_addr(&self) -> Result<u64>;
+    /// Write the tree to disk and return the root's address. Ok(None) will
+    /// be returned if the current tree has no data to write
+    fn store(&mut self, storage: &mut impl Storage) -> Result<Option<u64>>;
+
     /// Search the tree for the given KEY
-    fn find(&mut self, key: &str, storage: &mut impl Storage) -> Result<Option<String>>;
+    fn find(&mut self, key: &str, storage: &mut impl Storage) -> Result<Option<Self::Value>>;
 
     /// Insert a new pair of KEY:VALUE
-    fn insert(&mut self, key: String, value: String, storage: &mut impl Storage) -> Result<T>;
+    fn insert(&mut self, key: String, value: Self::Value, storage: &mut impl Storage)
+        -> Result<()>;
 
     /// Delete a TreeNode, if there is any.
-    fn delete(&mut self, key: &str, storage: &mut impl Storage) -> Result<T>;
+    fn delete(&mut self, key: &str, storage: &mut impl Storage) -> Result<()>;
 }
 
-// struct BinaryTree {}
+type NodeAgent = TreeNodeAgent<StringAgent>;
+type NodeAgentCell = Rc<RefCell<NodeAgent>>;
+type ValueAgentCell = Rc<RefCell<StringAgent>>;
 
-// impl BinaryTree {
-//     fn _find(
-//         &mut self,
-//         key: &str,
-//         agent: Option<NodeAgentCell>,
-//         storage: &mut impl Storage,
-//     ) -> Result<Option<ValueAgentCell>> {
-//         if let Some(agent) = agent {
-//             let mut agent = agent.borrow_mut();
-//             let node = agent.get_mut(storage)?.unwrap();
-//             debug!("[_find] Find alone node {:?}", node.key);
-//             if key < &node.key {
-//                 self._find(key, node.left_agent.clone(), storage)
-//             } else if key > &node.key {
-//                 self._find(key, node.right_agent.clone(), storage)
-//             } else {
-//                 Ok(Some(node.value_agent.clone()))
-//             }
-//         } else {
-//             Ok(None)
-//         }
-//     }
+struct BinaryTree {
+    root: Option<NodeAgentCell>,
+}
 
-//     fn _insert(
-//         &mut self,
-//         key: String,
-//         value: String,
-//         agent: Option<NodeAgentCell>,
-//         storage: &mut impl Storage,
-//     ) -> Result<(NodeAgentCell, usize)> {
-//         if let Some(agent) = agent {
-//             let mut agent = agent.borrow_mut();
-//             let node = agent.get(storage)?.unwrap();
-//             let mut new_node = node.clone();
-//             let mut size_delta = 0;
-//             if key < node.key {
-//                 let result = self._insert(key, value, node.left_agent.clone(), storage)?;
-//                 new_node.left_agent = Some(result.0);
-//                 size_delta = result.1;
-//                 new_node.size += size_delta;
-//             } else if key > node.key {
-//                 let result = self._insert(key, value, node.right_agent.clone(), storage)?;
-//                 new_node.right_agent = Some(result.0);
-//                 size_delta = result.1;
-//                 new_node.size += size_delta;
-//             } else {
-//                 new_node.value_agent = rc!(StringAgent::new(Some(value), None));
-//             }
-//             debug!(
-//                 "[_insert] Return insert alone node {:?} with size {}",
-//                 new_node.key, new_node.size
-//             );
-//             Ok((rc!(TreeNodeAgent::new(Some(new_node), None)), size_delta))
-//         } else {
-//             // new a TreeNode
-//             debug!(
-//                 "[_insert] New a TreeNode with {}:{} with size 1",
-//                 key, value
-//             );
-//             Ok((
-//                 rc!(TreeNodeAgent::new(Some(TreeNode::new(key, value)), None)),
-//                 1,
-//             ))
-//         }
-//     }
-// }
+impl BinaryTree {
+    fn _find(
+        &mut self,
+        key: &str,
+        agent: Option<NodeAgentCell>,
+        storage: &mut impl Storage,
+    ) -> Result<Option<ValueAgentCell>> {
+        if let Some(agent) = agent {
+            let mut agent = agent.borrow_mut();
+            let node = agent.get_mut(storage)?.unwrap();
+            debug!("[_find] Find alone node {:?}", node.key);
+            if key < &node.key {
+                self._find(key, node.left_agent.clone(), storage)
+            } else if key > &node.key {
+                self._find(key, node.right_agent.clone(), storage)
+            } else {
+                Ok(Some(node.value_agent.clone()))
+            }
+        } else {
+            Ok(None)
+        }
+    }
 
-// impl Tree<NodeAgentCell> for BinaryTree {
-//     fn new() -> Result<Self> {
-//         Ok(BinaryTree {})
-//     }
+    fn _insert(
+        &mut self,
+        key: String,
+        value: String,
+        agent: Option<NodeAgentCell>,
+        storage: &mut impl Storage,
+    ) -> Result<(NodeAgentCell, usize)> {
+        if let Some(agent) = agent {
+            let mut agent = agent.borrow_mut();
+            let node = agent.get(storage)?.unwrap();
+            let mut new_node = node.clone();
+            let mut size_delta = 0;
+            if key < node.key {
+                let result = self._insert(key, value, node.left_agent.clone(), storage)?;
+                new_node.left_agent = Some(result.0);
+                size_delta = result.1;
+                new_node.size += size_delta;
+            } else if key > node.key {
+                let result = self._insert(key, value, node.right_agent.clone(), storage)?;
+                new_node.right_agent = Some(result.0);
+                size_delta = result.1;
+                new_node.size += size_delta;
+            } else {
+                new_node.value_agent = rc!(StringAgent::new(Some(value), None));
+            }
+            debug!(
+                "[_insert] Return insert alone node {:?} with size {}",
+                new_node.key, new_node.size
+            );
+            Ok((rc!(TreeNodeAgent::new(Some(new_node), None)), size_delta))
+        } else {
+            // new a TreeNode
+            debug!(
+                "[_insert] New a TreeNode with {}:{} with size 1",
+                key, value
+            );
+            Ok((
+                rc!(TreeNodeAgent::new(Some(TreeNode::new(key, value)), None)),
+                1,
+            ))
+        }
+    }
+}
 
-//     fn find(
-//         &mut self,
-//         key: &str,
-//         agent: Option<NodeAgentCell>,
-//         storage: &mut impl Storage,
-//     ) -> Result<Option<String>> {
-//         match self._find(key, agent, storage)? {
-//             Some(agent) => {
-//                 // every value agent must have a value after `get`
-//                 // it is safe to unwrap it
-//                 let value_ref = agent.borrow_mut().get(storage)?.unwrap();
-//                 Ok(Some(String::from(value_ref)))
-//             }
-//             None => Ok(None),
-//         }
-//     }
+impl DBTree for BinaryTree {
+    type Value = String;
 
-//     fn insert(
-//         &mut self,
-//         key: String,
-//         value: String,
-//         agent: Option<NodeAgentCell>,
-//         storage: &mut impl Storage,
-//     ) -> Result<NodeAgentCell> {
-//         let (agent, _) = self._insert(key, value, agent, storage)?;
-//         Ok(agent)
-//     }
+    fn new() -> Result<Self> {
+        Ok(BinaryTree { root: None })
+    }
 
-//     fn delete(
-//         &mut self,
-//         key: &str,
-//         agent: Option<NodeAgentCell>,
-//         storage: &mut impl Storage,
-//     ) -> Result<NodeAgentCell> {
-//         unimplemented!()
-//     }
-// }
+    fn change_view(&mut self, addr: u64) -> Result<()> {
+        self.root = Some(rc!(NodeAgent::new(None, Some(addr))));
+        Ok(())
+    }
+
+    fn store(&mut self, storage: &mut impl Storage) -> Result<Option<u64>> {
+        if let Some(ref root) = self.root {
+            root.borrow_mut().store(storage)?;
+            let addr = root.borrow().addr().unwrap();
+            Ok(Some(addr))
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn find(&mut self, key: &str, storage: &mut impl Storage) -> Result<Option<Self::Value>> {
+        let agent = self.root.as_ref().cloned();
+        if let Some(agent) = self._find(key, agent, storage)? {
+            if let Some(value_ref) = agent.borrow_mut().get(storage)? {
+                return Ok(Some(String::from(value_ref)));
+            }
+        }
+        Ok(None)
+    }
+
+    fn insert(
+        &mut self,
+        key: String,
+        value: Self::Value,
+        storage: &mut impl Storage,
+    ) -> Result<()> {
+        let agent = self.root.as_ref().cloned();
+        let (new_root, _) = self._insert(key, value, agent, storage)?;
+        self.root = Some(new_root);
+        Ok(())
+    }
+
+    fn delete(&mut self, key: &str, storage: &mut impl Storage) -> Result<()> {
+        unimplemented!()
+    }
+}
+
+/// High-level user interface.storage
+/// 
+/// DBDB maintains `Storage`, managing concurrent "transactions".
+/// 
+/// DBDB delegates read/write requests to inner immutable tree
+
+struct DBDB<T> {
+    storage: FileStorage,
+    guard: Option<FileStorageGuard>,
+    tree: T,
+}
+
+impl<T: DBTree> DBDB<T> {
+    pub fn new() {}
+    pub fn begin() {}
+    pub fn commit() {}
+    pub fn get() {}
+    pub fn put() {}
+    pub fn del() {}
+}
+
 
 pub struct LogicalTree {
     storage: FileStorage,

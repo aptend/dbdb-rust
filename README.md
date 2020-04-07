@@ -12,7 +12,7 @@ DBDB in Rust, inspired by [500lines/dbdb](https://github.com/aosabook/500lines/t
 
 - 树节点和代理节点的递归
 - `Rc<RefCell<T>>`的使用
-
+- 利用`DBTree` trait分离具体的树实现，`LogicalTree`只用来管理storage的并发，读写请求都直接转给`DBTree`
 
 
 ### 类型参数(type parameter)和关联类型(associated type)该怎么选？
@@ -20,7 +20,7 @@ DBDB in Rust, inspired by [500lines/dbdb](https://github.com/aosabook/500lines/t
 关联类型更强调与trait的实现类型的唯一对应。实现类型一旦确定，关联类型就不要改变了。如果使用类型参数，那么对同一个实现类型，可以用impl语句多次实现。
 
 
-但也不能说实现类型只有一个关联类型。比如类型参数和关联类型同时使用时，
+但也不能说实现类型只有一个关联类型。比如类型参数和关联类型同时使用时。
 ```rust
 trait Foo<T> {
     type Inner;
@@ -52,5 +52,5 @@ fn main() {
 
 ```
 
-一般来说先从关联类型入手，当需要更高的灵活性是采用类型参数
+一般来说先从关联类型入手，当需要更高的灵活性时采用类型参数
 
