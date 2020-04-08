@@ -2,6 +2,7 @@ use std::io::SeekFrom;
 use std::marker::PhantomData;
 
 use std::cell::RefCell;
+use std::cmp::Ordering;
 use std::rc::Rc;
 
 use std::clone::Clone;
@@ -320,12 +321,10 @@ impl BinaryTree {
             let mut agent = agent.borrow_mut();
             let node = agent.get_mut(storage)?.unwrap();
             debug!("[_find] Find alone node {:?}", node.key);
-            if key < &node.key {
-                self._find(key, node.left_agent.clone(), storage)
-            } else if key > &node.key {
-                self._find(key, node.right_agent.clone(), storage)
-            } else {
-                Ok(Some(node.value_agent.clone()))
+            match key.cmp(&node.key) {
+                Ordering::Less => self._find(key, node.left_agent.clone(), storage),
+                Ordering::Greater => self._find(key, node.right_agent.clone(), storage),
+                Ordering::Equal => Ok(Some(node.value_agent.clone())),
             }
         } else {
             Ok(None)
@@ -344,18 +343,22 @@ impl BinaryTree {
             let node = agent.get(storage)?.unwrap();
             let mut new_node = node.clone();
             let mut size_delta = 0;
-            if key < node.key {
-                let result = self._insert(key, value, node.left_agent.clone(), storage)?;
-                new_node.left_agent = Some(result.0);
-                size_delta = result.1;
-                new_node.size += size_delta;
-            } else if key > node.key {
-                let result = self._insert(key, value, node.right_agent.clone(), storage)?;
-                new_node.right_agent = Some(result.0);
-                size_delta = result.1;
-                new_node.size += size_delta;
-            } else {
-                new_node.value_agent = rc!(StringAgent::new(Some(value), None));
+            match key.cmp(&node.key) {
+                Ordering::Less => {
+                    let result = self._insert(key, value, node.left_agent.clone(), storage)?;
+                    new_node.left_agent = Some(result.0);
+                    size_delta = result.1;
+                    new_node.size += size_delta;
+                }
+                Ordering::Greater => {
+                    let result = self._insert(key, value, node.right_agent.clone(), storage)?;
+                    new_node.right_agent = Some(result.0);
+                    size_delta = result.1;
+                    new_node.size += size_delta;
+                }
+                Ordering::Equal => {
+                    new_node.value_agent = rc!(StringAgent::new(Some(value), None));
+                }
             }
             debug!(
                 "[_insert] Return insert alone node {:?} with size {}",
@@ -433,7 +436,7 @@ impl DBTree for BinaryTree {
 
 struct LogicalTree<T> {
     storage: Rc<RefCell<FileStorage>>,
-    // actually, guard is like a token, we hold it during transaction, 
+    // actually, guard is like a token, we hold it during transaction,
     // but don't use it to write
     guard: Option<FileStorageGuard>,
     tree: T,
@@ -534,7 +537,6 @@ impl<T: DBTree> LogicalTree<T> {
         unimplemented!()
     }
 }
-
 
 #[cfg(test)]
 mod tree_test {
