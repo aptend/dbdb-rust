@@ -1,3 +1,5 @@
+//! Append-only storage for an immutable tree.
+//!
 use crate::serde_interface::{SerdeBincode, SerdeInterface};
 
 use serde::{Deserialize, Serialize};

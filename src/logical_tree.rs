@@ -1,3 +1,6 @@
+//! Immutable Tree.
+//!
+
 use std::io::SeekFrom;
 use std::marker::PhantomData;
 
@@ -26,7 +29,7 @@ macro_rules! rc {
 ///
 /// Every agent knows how to dump its inner data to disk and how to load data
 /// from disk
-trait Agent {
+pub trait Agent {
     type Inner;
     /// Create a new Agent. There are usually two use cases:
     ///
@@ -114,7 +117,7 @@ impl<S: SerdeInterface> Agent for StringAgent<S> {
 struct TreeNodeAgent<V, S = SerdeJson> {
     // this is a recursive struct, be careful
     inner: Option<TreeNode<V, Self>>,
-    pub addr: Option<u64>,
+    addr: Option<u64>,
     format: PhantomData<S>,
 }
 
@@ -275,10 +278,12 @@ where
     }
 }
 
-/// Tree, an immutable tree holding user data, works with user interface
+/// DBTree, an immutable tree holding user data, works with user interface
 ///  and do some read and write things
-trait DBTree {
+pub trait DBTree {
+    /// The type of VALUE of KEY:VALUE
     type Value;
+
     /// Create a new Tree.
     fn new() -> Result<Self>
     where
@@ -604,9 +609,9 @@ mod tree_test {
         let path = tempfile::NamedTempFile::new().unwrap().into_temp_path();
         let mut tree = LogicalTree::<BinaryTree>::new(path).unwrap();
         assert_eq!(None, tree.get("hi").unwrap());
-        // tree.put("hello".to_owned(), "world".to_owned()).unwrap();
-        // tree.put("hi".to_owned(), "alice".to_owned()).unwrap();
-        // tree.put("arc".to_owned(), "shadow".to_owned()).unwrap();
+        tree.put("hello".to_owned(), "world".to_owned()).unwrap();
+        tree.put("hi".to_owned(), "alice".to_owned()).unwrap();
+        tree.put("arc".to_owned(), "shadow".to_owned()).unwrap();
         tree.put("before".to_owned(), "end".to_owned()).unwrap();
         assert_eq!(Some("end".to_owned()), tree.get("before").unwrap());
         assert_eq!(None, tree.get("zoo").unwrap());
