@@ -1,18 +1,58 @@
-DBDB in Rust, inspired by [500lines/dbdb](https://github.com/aosabook/500lines/tree/master/data-store/code/dbdb)
+DBDB in Rust, inspired by [500lines/dbdb](https://github.com/aosabook/500lines/DBTree/master/data-store/code/dbdb)
 
 
 ### RAII模式的文件锁
 
 - 如何处理`FileStorage`中的`File`字段加文件锁
 - 为`FileStorage`实现`cluFlock::FromElement`和`Deref`
-- lock对象是`&mut File`，在使用时出现自引用问题
-- `File::try_clone()`
+- 如果lock对象是`&mut File`，在使用时出现自引用问题, 所以使用了`File::try_clone()`
+- 跨多个调用，需要维护`Guard`变量，但不使用，合适吗？
 
 ### 递归类型定义
 
-- 树节点和代理节点的递归
-- `Rc<RefCell<T>>`的使用
-- 利用`DBTree` trait分离具体的树实现，`LogicalTree`只用来管理storage的并发，读写请求都直接转给`DBTree`
+- 树节点
+
+  `Rc<RefCell<T>>`就可以看成是Python的变量名，采用引用计数回收内存
+
+- 代理节点的递归
+
+    打算给Agent写一个trait，`Agent<T>`，然后每个`TreeNode`的左右子节点指向`Agent`的泛型，使用时用`TreeNode<V, N>`确定`TreeNode`的具体类型，这样就可以设置不同的`V`和`N`，得到不同行为的`store`、`get`、`get_mut`
+
+- 利用`DBTree` trait分离具体的树实现，`LogicalTree`只用来管理`Storage`的并发，读写请求都直接转给`DBTree`
+
+    但是，`DBTree`工作需要传入`Storage`的独占引用，`DBTree`本身也要mut，就给`LogicalTree`造成了所有权的冲突。解决选择：1. 把`Storage` Rc化. 2. `Storage`放入`DBTree`，直接利用本身已经Rc的`NodeAgentCell`。第二种实际就是未设计`DBTree`时的方案，每次操作只会使用`Storage`的独占引用，`DBTree`则由`NodeAgentCell`作为根节点来表示，每次操作克隆一份，用完直接销毁就好。因此，似乎这里应该选择第一种方案，`DBTree`借出独占引用，然后使用共享所有权的`Storage`。
+
+    但两个方式都没有逃过Rc的范围，那这种两个mut对象的协作的场景有更好的解决方案吗？
+
+- 共享`Storage`后，运行时显示`BorrowMutError`，重复借出独占引用，调用栈定位到`put`方法：
+    ```rust
+    if self.guard.is_none() {
+        self.begin()?;
+        let storage = self.storage.clone();
+        let storage = &mut *storage.borrow_mut();
+        self.tree.insert(key, value, storage)?;
+        self.commit()?;
+    }
+        ...
+   
+    ```
+    确实`commit`中也向`storage`索要了独占引用。第一反应是`insert`之后`drop(storage);`，不过错误依旧。想起来借用检查是和作用域相关的，所以改成下面这样就没问题了
+
+    ```rust
+    if self.guard.is_none() {
+        self.begin()?;
+        {
+            let storage = self.storage.clone();
+            let storage = &mut *storage.borrow_mut();
+            self.tree.insert(key, value, storage)?;
+        }
+        self.commit()?;
+    }
+        ...
+    ```
+    记下来作为之后理解`drop`和运行时检查的材料
+
+
 
 
 ### 类型参数(type parameter)和关联类型(associated type)该怎么选？
@@ -53,4 +93,5 @@ fn main() {
 ```
 
 一般来说先从关联类型入手，当需要更高的灵活性时采用类型参数
+关联类型的Trait绑定还是还在proposal阶段？
 
