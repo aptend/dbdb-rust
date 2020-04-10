@@ -388,14 +388,14 @@ impl BinaryTree {
         &mut self,
         agent: Option<NodeAgentCell>,
         storage: &mut impl Storage,
-    ) -> Result<(Option<NodeAgentCell>, Option<ValueAgentCell>)> {
-        if let Some(agent) = agent {
-            let mut agent = agent.borrow_mut();
-            let node = agent.get(storage)?.unwrap();
+    ) -> Result<(Option<NodeAgentCell>, Option<NodeAgentCell>)> {
+        if let Some(ref ag) = agent {
+            let mut ag = ag.borrow_mut();
+            let node = ag.get(storage)?.unwrap();
             let mut new_node = node.clone();
             new_node.size -= 1;
             if node.left_agent.is_none() {
-                Ok((node.right_agent.clone(), Some(node.value_agent.clone())))
+                Ok((node.right_agent.clone(), agent.clone()))
             } else {
                 let result = self._delmin(node.left_agent.clone(), storage)?;
                 new_node.left_agent = result.0;
@@ -412,46 +412,44 @@ impl BinaryTree {
         key: &str,
         agent: Option<NodeAgentCell>,
         storage: &mut impl Storage,
-    ) -> Result<(Option<NodeAgentCell>, usize)> {
+    ) -> Result<Option<NodeAgentCell>> {
         if let Some(agent) = agent {
             let mut agent = agent.borrow_mut();
             let node = agent.get(storage)?.unwrap();
             let mut new_node = node.clone();
-            let mut size_delta = 0;
+            new_node.size -= 1;
             match key.cmp(&node.key) {
                 Ordering::Less => {
-                    let result = self._delete(key, node.left_agent.clone(), storage)?;
-                    new_node.left_agent = result.0;
-                    size_delta = result.1;
-                    new_node.size -= size_delta;
+                    new_node.left_agent = self._delete(key, node.left_agent.clone(), storage)?;
                 }
                 Ordering::Greater => {
-                    let result = self._delete(key, node.right_agent.clone(), storage)?;
-                    new_node.left_agent = result.0;
-                    size_delta = result.1;
-                    new_node.size -= size_delta;
+                    new_node.right_agent = self._delete(key, node.right_agent.clone(), storage)?;
                 }
                 Ordering::Equal => {
                     if node.left_agent.is_some() && node.right_agent.is_some() {
-                        let (modified, replace_v) =
+                        let (modified, replace) =
                             self._delmin(node.right_agent.clone(), storage)?;
-                        if let Some(replace_v) = replace_v {
-                            new_node.value_agent = replace_v;
+                        if let Some(replace) = replace {
+                            let mut replace = replace.borrow_mut();
+                            let r_node = replace.get(storage)?.unwrap();
+                            new_node.value_agent = r_node.value_agent.clone();
+                            new_node.key = r_node.key.clone();
                             new_node.right_agent = modified;
                         }
                     } else if node.left_agent.is_some() {
-                        return Ok((node.left_agent.clone(), 1));
+                        return Ok(node.left_agent.clone());
                     } else {
-                        return Ok((node.right_agent.clone(), 1));
+                        return Ok(node.right_agent.clone());
                     }
                 }
             }
-            Ok((
-                Some(rc!(TreeNodeAgent::new(Some(new_node), None))),
-                size_delta,
-            ))
+            debug!(
+                "[_delete] Return delete alone node {:?} with size {}",
+                new_node.key, new_node.size
+            );
+            Ok(Some(rc!(TreeNodeAgent::new(Some(new_node), None))))
         } else {
-            Ok((None, 0))
+            Ok(None)
         }
     }
 }
@@ -500,8 +498,13 @@ impl DBTree for BinaryTree {
         Ok(())
     }
 
-    fn delete(&mut self, _key: &str, _storage: &mut impl Storage) -> Result<()> {
-        unimplemented!()
+    fn delete(&mut self, key: &str, storage: &mut impl Storage) -> Result<()> {
+        let agent = self.root.as_ref().cloned();
+        if self._find(key, agent.clone(), storage)?.is_some() {
+            debug!("[delete] found key {:?}", key);
+            self.root = self._delete(key, agent, storage)?;
+        }
+        Ok(())
     }
 }
 
@@ -610,8 +613,22 @@ impl<T: DBTree> LogicalTree<T> {
         Ok(())
     }
 
-    pub fn del() {
-        unimplemented!()
+    pub fn del(&mut self, key: &str) -> Result<()> {
+        debug!("[del] Begin with {:?}", key);
+        if self.guard.is_none() {
+            self.begin()?;
+            {
+                let storage = self.storage.clone();
+                let storage = &mut *storage.borrow_mut();
+                self.tree.delete(key, storage)?;
+            }
+            self.commit()?;
+        } else {
+            let storage = self.storage.clone();
+            let storage = &mut *storage.borrow_mut();
+            self.tree.delete(key, storage)?;
+        }
+        Ok(())
     }
 }
 
@@ -677,22 +694,37 @@ mod tree_test {
 
     #[test]
     fn test_binary_tree_in_memory() {
-        // pretty_env_logger::init();
+        pretty_env_logger::init();
         let path = tempfile::NamedTempFile::new().unwrap().into_temp_path();
         let mut tree = LogicalTree::<BinaryTree>::new(path).unwrap();
+        tree.begin().unwrap();
+        // get nothing
         assert_eq!(None, tree.get("hi").unwrap());
-        tree.put("hello".to_owned(), "world".to_owned()).unwrap();
-        tree.put("hi".to_owned(), "alice".to_owned()).unwrap();
-        tree.put("arc".to_owned(), "shadow".to_owned()).unwrap();
-        tree.put("before".to_owned(), "end".to_owned()).unwrap();
-        assert_eq!(Some("end".to_owned()), tree.get("before").unwrap());
+
+        // put get delete and get nothing
+        tree.put("a".to_owned(), "1".to_owned()).unwrap();
+        assert_eq!(Some("1".to_owned()), tree.get("a").unwrap());
+        tree.del("a").unwrap();
+        assert_eq!(None, tree.get("a").unwrap());
+
+        tree.put("c".to_owned(), "3".to_owned()).unwrap();
+        tree.put("a".to_owned(), "1".to_owned()).unwrap();
+        tree.put("d".to_owned(), "4".to_owned()).unwrap();
         assert_eq!(None, tree.get("zoo").unwrap());
+        tree.del("zoo").unwrap();
+        assert_eq!(None, tree.get("zoo").unwrap());
+        tree.del("c").unwrap();
+        assert_eq!(None, tree.get("c").unwrap());
+        assert_eq!(Some("4".to_owned()), tree.get("d").unwrap());
+        assert_eq!(Some("1".to_owned()), tree.get("a").unwrap());
+        // no commit here
     }
 
     #[test]
     fn test_binary_tree_store() {
         let path = tempfile::NamedTempFile::new().unwrap().into_temp_path();
         let mut tree = LogicalTree::<BinaryTree>::new(&path).unwrap();
+        tree.begin().unwrap();
         tree.put("hello".to_owned(), "world".to_owned()).unwrap();
         tree.put("hi".to_owned(), "alice".to_owned()).unwrap();
         tree.put("arc".to_owned(), "shadow".to_owned()).unwrap();
