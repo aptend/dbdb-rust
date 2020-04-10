@@ -382,6 +382,78 @@ impl BinaryTree {
             ))
         }
     }
+
+    // return (modified_node, replacement_node)
+    fn _delmin(
+        &mut self,
+        agent: Option<NodeAgentCell>,
+        storage: &mut impl Storage,
+    ) -> Result<(Option<NodeAgentCell>, Option<ValueAgentCell>)> {
+        if let Some(agent) = agent {
+            let mut agent = agent.borrow_mut();
+            let node = agent.get(storage)?.unwrap();
+            let mut new_node = node.clone();
+            new_node.size -= 1;
+            if node.left_agent.is_none() {
+                Ok((node.right_agent.clone(), Some(node.value_agent.clone())))
+            } else {
+                let result = self._delmin(node.left_agent.clone(), storage)?;
+                new_node.left_agent = result.0;
+                let new_agent = Some(rc!(TreeNodeAgent::new(Some(new_node), None)));
+                Ok((new_agent, result.1))
+            }
+        } else {
+            Ok((None, None))
+        }
+    }
+
+    fn _delete(
+        &mut self,
+        key: &str,
+        agent: Option<NodeAgentCell>,
+        storage: &mut impl Storage,
+    ) -> Result<(Option<NodeAgentCell>, usize)> {
+        if let Some(agent) = agent {
+            let mut agent = agent.borrow_mut();
+            let node = agent.get(storage)?.unwrap();
+            let mut new_node = node.clone();
+            let mut size_delta = 0;
+            match key.cmp(&node.key) {
+                Ordering::Less => {
+                    let result = self._delete(key, node.left_agent.clone(), storage)?;
+                    new_node.left_agent = result.0;
+                    size_delta = result.1;
+                    new_node.size -= size_delta;
+                }
+                Ordering::Greater => {
+                    let result = self._delete(key, node.right_agent.clone(), storage)?;
+                    new_node.left_agent = result.0;
+                    size_delta = result.1;
+                    new_node.size -= size_delta;
+                }
+                Ordering::Equal => {
+                    if node.left_agent.is_some() && node.right_agent.is_some() {
+                        let (modified, replace_v) =
+                            self._delmin(node.right_agent.clone(), storage)?;
+                        if let Some(replace_v) = replace_v {
+                            new_node.value_agent = replace_v;
+                            new_node.right_agent = modified;
+                        }
+                    } else if node.left_agent.is_some() {
+                        return Ok((node.left_agent.clone(), 1));
+                    } else {
+                        return Ok((node.right_agent.clone(), 1));
+                    }
+                }
+            }
+            Ok((
+                Some(rc!(TreeNodeAgent::new(Some(new_node), None))),
+                size_delta,
+            ))
+        } else {
+            Ok((None, 0))
+        }
+    }
 }
 
 impl DBTree for BinaryTree {
